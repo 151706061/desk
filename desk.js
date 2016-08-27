@@ -1,35 +1,39 @@
-var	actions      = require(__dirname + '/lib/index.js').server();
-	argv         = require('yargs').argv,
-	async        = require('async'),
-	auth         = require('basic-auth'),
-	bodyParser   = require('body-parser'),
-	compress     = require('compression'),
-	crypto       = require('crypto'),
-	directory    = require('serve-index'),
-	express      = require('express'),
-	formidable   = require('formidable'),
-    fs           = require('fs-extra'),
-    fwd          = require('fwd'),
-	http         = require('http'),
-	https        = require('https'),
-	libPath      = require('path'),
-	os           = require('os'),
-	process      = require('process'),
-	socketIO     = require('socket.io');
+'use strict';
 
-var homeURL         = argv.multi ? '/' + process.env.USER + '/' : '/',
-	port            = argv.multi ? process.env.PORT : 8080,
-	clientPath      = libPath.join(__dirname, 'client') + '/',
-	privateKeyFile  = libPath.join(__dirname, "privatekey.pem"),
-	certificateFile = libPath.join(__dirname, "certificate.pem"),
-	deskDir         = libPath.join(os.homedir(), 'desk') + '/',
-	passwordFile    = libPath.join(deskDir, "password.json"),
-	uploadDir       = libPath.join(deskDir, 'upload') + '/',
-	id              = {username : process.env.USER, password : "password"};
+const actions    = require('desk-base'),
+      argv       = require('yargs').argv,
+      auth       = require('basic-auth'),
+      bodyParser = require('body-parser'),
+      compress   = require('compression'),
+      crypto     = require('crypto'),
+      directory  = require('serve-index'),
+      express    = require('express'),
+      formidable = require('formidable'),
+      fs         = require('fs-extra'),
+      fwd        = require('fwd'),
+      http       = require('http'),
+      https      = require('https'),
+      os         = require('os'),
+      path       = require('path'),
+      psTree     = require('ps-tree'),
+      pty        = require('pty.js'),
+      socketIO   = require('socket.io');
 
-var baseURL, server, io;
+const certificateFile = path.join(__dirname, "certificate.pem"),
+      deskDir         = actions.getRootDir(),
+      homeURL         = argv.multi ? '/' + process.env.USER + '/' : '/',
+      port            = argv.multi ? process.env.PORT : 8080,
+      passwordFile    = path.join(deskDir, "password.json"),
+      privateKeyFile  = path.join(__dirname, "privatekey.pem"),
+      uploadDir       = path.join(deskDir, 'upload') + '/';
 
-var app = express()
+let baseURL, server, io,
+	id = {
+		username : process.env.USER,
+		password : "password"
+	};
+
+let app = express()
 	.use(compress())
 	.set('trust proxy', true)
 	.use (function (req, res, next) {
@@ -37,10 +41,11 @@ var app = express()
 		next();
 	})
 	.use(function(req, res, next) {
-		var user = auth(req) || {};
-		var shasum = crypto.createHash('sha1');
+		let user = auth(req) || {};
+		let shasum = crypto.createHash('sha1');
 		shasum.update(user.pass || '');
-		if ((id.username === undefined) || (id.sha === undefined)
+		if ((id.username === undefined)
+			|| (id.sha === undefined)
 			|| (user && user.name === id.username && shasum.digest('hex') === id.sha)) {
 				next();
 				return;
@@ -53,6 +58,7 @@ var app = express()
 fs.mkdirsSync(deskDir);
 fs.mkdirsSync(uploadDir);
 
+actions.include(__dirname + '/extensions');
 
 if (fs.existsSync(privateKeyFile) && fs.existsSync(certificateFile)) {
 	server = https.createServer({
@@ -65,7 +71,7 @@ if (fs.existsSync(privateKeyFile) && fs.existsSync(certificateFile)) {
 	baseURL = "http://";
 }
 
-io = socketIO(server, {path : libPath.join(homeURL, "socket/socket.io")});
+io = socketIO(server, {path : path.join(homeURL, 'socket.io')});
 
 function log (message) {
 	console.log(message);
@@ -89,7 +95,7 @@ function updatePassword() {
 
 	if (id.password) {
 		// convert to secure format
-		var shasum = crypto.createHash('sha1');
+		let shasum = crypto.createHash('sha1');
 		shasum.update(id.password);
 		id.sha = shasum.digest('hex');
 		delete id.password;
@@ -98,35 +104,44 @@ function updatePassword() {
 }
 updatePassword();
 
-var router = express.Router()
+function moveFile(file, outputDir) {
+	log("file : " + file.path.toString());
+	let fullName = path.join(outputDir, file.name);
+	let index = 0;
+	let newFile;
+
+	function tryToMove() {
+		newFile = fullName + ( index > 0 ? "." + index : "" );
+		fs.exists(newFile, function (exists) {
+			if (exists) {
+				index++;
+				tryToMove();
+				return;
+			}
+			fs.move(file.path.toString(), newFile, function(err) {
+				if (err) throw err;
+				log("uploaded to " +  newFile);
+			});
+		});
+	}
+
+	tryToMove();
+}
+
+let router = express.Router()
 	.post('/upload', function(req, res) {
-		var form = new formidable.IncomingForm();
+		let form = new formidable.IncomingForm();
+		let outputDir;
+		let files = [];
 		form.uploadDir = uploadDir;
 		form.parse(req, function(err, fields, files) {
-			var file = files.file;
-			var outputDir = fields.uploadDir.toString().replace(/%2F/g,'/') || 'upload';
-			outputDir = libPath.join(deskDir, outputDir);
-			log("file : " + file.path.toString());
-			var fullName = libPath.join(outputDir, file.name.toString());
-			var exists = true;
-			var index = 0;
-			var newfile;
-			async.whilst(function () {
-				return exists;
-			}, function (callback) {
-				newFile = fullName + ( index > 0 ? "." + index : "" );
-				fs.exists(newFile, function (fileExist) {
-					exists = fileExist;
-					index++;
-					callback();
-				});
-			}, function () {
-				fs.move(file.path.toString(), newFile, function(err) {
-					if (err) throw err;
-					res.send('file ' + file.name + ' uploaded successfully');
-					log("uploaded to " +  newFile);
-				});
-			});
+			outputDir = path.join(deskDir, unescape(fields.uploadDir));
+		});
+
+		form.on('file', (name, file) => files.push(file));
+		form.on('end', function() {
+			res.send('file(s) uploaded successfully');
+			files.forEach(file => moveFile(file, outputDir));
 		});
 	})
 	.post('/password', function(req, res) {
@@ -135,7 +150,7 @@ var router = express.Router()
 			return;
 		}
 		if (req.body.password.length > 4) {
-			var shasum = crypto.createHash('sha1');
+			let shasum = crypto.createHash('sha1');
 			shasum.update(req.body.password);
 			id.sha = shasum.digest('hex');
 			fs.writeFileSync(passwordFile, JSON.stringify(id));
@@ -144,43 +159,87 @@ var router = express.Router()
 			res.json({error : 'password too short!'});
 		}
 	})
-	.use('/', express.static(libPath.join(clientPath, 'application/build')))
-	.use('/files', express.static(deskDir))
-	.use('/files', directory(deskDir))
-	.use('/', express.static(clientPath))
-	.use('/', directory(clientPath))
-	.use('/js', express.static(libPath.join(__dirname, 'cache')));
+	.use('/', express.static(__dirname + '/node_modules/desk-ui/build'),
+		express.static(deskDir),
+		directory(deskDir));
 
 app.use(homeURL, router);
 
 io.on('connection', function (socket) {
-	var ip = (socket.client.conn.request.headers['x-forwarded-for']
+	let ip = (socket.client.conn.request.headers['x-forwarded-for']
 		|| socket.handshake.address).split(":").pop();
 
 	log('connect : ' + ip);
+	io.emit("actions updated", actions.getSettings());
 
-	socket.on('disconnect', function() {
-			log('disconnect : ' + ip);
-		})
-		.on('action', function(parameters) {
-			actions.execute(parameters, function (response) {
-				io.emit("action finished", response);
-			});
-		});
+	socket.on('disconnect', () => log('disconnect : ' + ip))
+		.on('action', action => actions.execute(action,
+			res => io.emit("action finished", res)))
+		.on('setEmitLog', log => actions.setEmitLog(log));
 
     fwd(actions, socket);
+
 });
 
-actions.on('log', log);
+var terms = {};
 
-var nCPUS = os.cpus().length;
-function emitLoad () {
-	io.emit("loadavg", os.loadavg().map(function (avg) {
-		return avg / nCPUS;
-	}));
-	setTimeout(emitLoad, 5000);
-}
-emitLoad();
+if (actions.getSettings().permissions) io.of( '/xterm' ).on( 'connection', function( socket ) {
+	socket.on( 'newTerminal', function( options ) {
+		if ( terms[ options.name ] ) return;
+		log( "new terminal : " + options.name );
+		io.of( '/xterm' + options.name ).on( 'connection', function( socket ) {
+			var term = pty.spawn(process.platform === 'win32' ? 'cmd.exe' : 'bash', [], {
+				name: 'xterm-color',
+				cols: 80,
+				rows: 24,
+				cwd: process.env.PWD,
+				env: process.env
+			})
+			.on('data', function(data) {
+				try {
+					socket.send(data);
+				} catch (ex) {
+				}
+			});
+			terms[ options.name ] = true;
+
+			socket.on('resize', function ( size ) {
+				term.resize( size.nCols, size.nRows );
+			})
+			.on('message', function(msg) {
+				term.write(msg);
+			})
+			.on('disconnect', function () {
+				psTree(term.pid, function (err, children) {
+					function kill (pid) {
+						try {
+							log( 'killing terminal process ' + pid );
+							process.kill(pid, 'SIGTERM');
+							process.kill(pid, 'SIGHUP');
+						} catch (e) {
+							log( 'could not kill process ' + pid + ' : ' + e );
+						}
+					}
+
+					children.forEach(function (child) {
+						kill (child.PID);
+					});
+					kill( term.pid );
+				});
+
+				const namespace = io.of( '/xterm' + options.name );
+				const connectedNameSpaceSockets = Object.keys(namespace.connected);
+				connectedNameSpaceSockets.forEach( socketId => {
+					connectedNameSpaceSockets[ socketId ].disconnect();
+				});
+				namespace.removeAllListeners();
+				delete io.nsps[ '/xterm' + options.name ]; // Remove from the server namespaces
+				log("namespaces : " + Object.keys(io.nsps).join(','));
+				delete terms[ options.name ];
+			});
+		});
+	});
+});
 
 server.listen(port);
 log ("server running : " + baseURL + "localhost:" + port + homeURL);
