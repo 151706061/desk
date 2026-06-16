@@ -20,6 +20,11 @@ for ( let name of [ "delete", "dump", "list", "start" ] ) {
 
 async function addUser( config, runningApps, user ) {
 
+	if ( config.unmanaged[ user ] ) {
+		console.log( user + " is an unmanaged port : " + config.unmanaged[ user ] );
+		return;
+	}
+
 	const app = runningApps.find( a => ( a.name === user ) );
 
 	if ( app ) {
@@ -163,11 +168,11 @@ switch ( action ) {
 }
 
 // sort ports
+config.ports = { ...config.ports, ...config.unmanaged }
 const entries = Object.entries( config.ports );
 entries.sort( ( a, b ) => a[ 0 ].toLowerCase().localeCompare( b[ 0 ].toLowerCase() ) );
 config.ports = {}
 for ( let [ user, port ] of entries ) config.ports[ user ] = port;
-
 await pm2.dumpAsync();
 fs.writeFileSync( file, JSON.stringify( config, null, "\t" ) );
 
